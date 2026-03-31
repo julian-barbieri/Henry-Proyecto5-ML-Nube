@@ -64,7 +64,7 @@ class InsuranceData(BaseModel):
     tendencia_ingresos_Sin_informacion: int
     
 # endpoint /health
-@app.get("/health", methods=["GET", "HEAD"])
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok"}
 
