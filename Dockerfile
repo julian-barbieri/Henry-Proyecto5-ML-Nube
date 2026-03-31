@@ -5,11 +5,9 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Copiar requirements
-COPY requirements.txt .
-
-# Instalar dependencias (timeout mayor por paquetes pesados)
+COPY requirements_api.txt .
 RUN pip install --upgrade pip \
-	&& pip install --no-cache-dir --default-timeout=300 -r requirements.txt
+    && pip install --no-cache-dir --default-timeout=300 -r requirements_api.txt
 
 # Copiar código fuente
 COPY src/ ./src/

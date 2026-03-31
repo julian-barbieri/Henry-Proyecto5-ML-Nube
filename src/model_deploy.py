@@ -63,6 +63,11 @@ class InsuranceData(BaseModel):
     tendencia_ingresos_Decreciente: int
     tendencia_ingresos_Sin_informacion: int
     
+# endpoint /health
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 # 5) vamos a crearnos el 1er endpoint: /saludo
 @app.post("/predict")
 def predict(data: InsuranceData):
@@ -79,6 +84,6 @@ def predict_batch(data: List[InsuranceData]):
     predictions = model.predict(input_df)
     return {"Predicted_default": [int(p) for p in predictions]}
 
-# ejecutar con: uvicorn filename:app --reload
+
 
 
