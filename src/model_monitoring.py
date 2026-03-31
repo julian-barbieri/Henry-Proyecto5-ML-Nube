@@ -15,6 +15,7 @@ import plotly.express as px
 ##############
 LEGACY_MONITOR_LOG = "./data-drift/Base_de_datos.csv" #archivo legado (ya no se utiliza)
 DATA_OUTPUT_DIR = "./predicciones" #salida de predicciones por lotes
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 
 
 ##############
@@ -553,7 +554,7 @@ if logged_data is not None and len(logged_data) > 0:
                                 
                                 # Request a la API de batch
                                 response = requests.post(
-                                    "http://localhost:8000/predict_batch",
+                                    f"{API_BASE_URL}/predict_batch",
                                     json=records,
                                     timeout=30
                                 )
@@ -593,7 +594,7 @@ if logged_data is not None and len(logged_data) > 0:
                                     st.error(f"Error en la API: {response.status_code}")
                                     st.write(response.text)
                             except requests.exceptions.ConnectionError:
-                                st.error("❌ No se puede conectar con la API. ¿Está corriendo en el puerto 8000?")
+                                st.error(f"❌ No se puede conectar con la API en {API_BASE_URL}. Verifica la variable API_BASE_URL y que la API esté activa.")
                             except Exception as e:
                                 st.error(f"❌ Error procesando predicciones: {str(e)}")
                 except Exception as e:
