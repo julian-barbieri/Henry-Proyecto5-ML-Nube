@@ -1,4 +1,5 @@
 import os
+import time
 import pandas as pd
 import numpy as np
 import requests
@@ -15,7 +16,7 @@ import plotly.express as px
 ##############
 LEGACY_MONITOR_LOG = "./data-drift/Base_de_datos.csv" #archivo legado (ya no se utiliza)
 DATA_OUTPUT_DIR = "./predicciones" #salida de predicciones por lotes
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 
 ##############
@@ -549,50 +550,90 @@ if logged_data is not None and len(logged_data) > 0:
                     if st.button("Hacer predicciones"):
                         with st.spinner("Procesando predicciones..."):
                             try:
-                                # Convertir cada fila a diccionario y hacer request
                                 records = df_batch.to_dict('records')
-                                
-                                # Request a la API de batch
-                                response = requests.post(
-                                    f"{API_BASE_URL}/predict_batch",
-                                    json=records,
-                                    timeout=30
-                                )
-                                
-                                if response.status_code == 200:
-                                    predictions = response.json()["Predicted_default"]
-                                    
-                                    # Guardar archivo del lote en carpeta data
-                                    output_path = log_predictions(df_batch, predictions)
-                                    
-                                    # Agregar predicciones al dataframe para mostrar
-                                    df_batch['Pago_atiempo'] = predictions
-                                    df_batch['Pago_atiempo'] = df_batch['Pago_atiempo'].astype(str).map({'0': '❌ No', '1': '✅ Sí'})
-                                    
-                                    st.success("✅ Predicciones completadas y archivo guardado en carpeta data")
-                                    st.info(f"Archivo generado: {output_path}")
-                                    st.dataframe(df_batch, width='stretch')
-                                    
-                                    # Botón de descarga
-                                    csv_results = df_batch.to_csv(index=False)
+                                all_predictions = []
+
+                                # ─── Parámetros configurables ──────────────────────────
+                                CHUNK_SIZE = 50      # registros por request
+                                MAX_RETRIES = 4      # intentos por chunk
+                                INITIAL_TIMEOUT = 60 # segundos (cubre cold start de Render)
+                                # ───────────────────────────────────────────────────────
+
+                                chunks = [records[i:i+CHUNK_SIZE] for i in range(0, len(records), CHUNK_SIZE)]
+                                progress = st.progress(0, text="Iniciando...")
+
+                                for idx, chunk in enumerate(chunks):
+                                    success = False
+
+                                    for attempt in range(MAX_RETRIES):
+                                        wait_time = 2 ** attempt  # 1s, 2s, 4s, 8s
+                                        try:
+                                            response = requests.post(
+                                                f"{API_BASE_URL}/predict_batch",
+                                                json=chunk,
+                                                timeout=INITIAL_TIMEOUT,
+                                            )
+
+                                            if response.status_code == 200:
+                                                all_predictions.extend(response.json()["Predicted_default"])
+                                                success = True
+                                                break
+
+                                            elif response.status_code == 429:
+                                                st.warning(f"Chunk {idx+1}: API saturada (429). Reintentando en {wait_time}s...")
+                                                time.sleep(wait_time)
+
+                                            else:
+                                                st.error(f"Chunk {idx+1}: Error {response.status_code} — {response.text}")
+                                                break
+
+                                        except requests.exceptions.Timeout:
+                                            st.warning(f"Chunk {idx+1}: Timeout. Reintentando en {wait_time}s...")
+                                            time.sleep(wait_time)
+
+                                        except requests.exceptions.ConnectionError:
+                                            st.error(f"❌ No se puede conectar con la API en {API_BASE_URL}.")
+                                            break
+
+                                    if not success:
+                                        st.error(f"❌ Chunk {idx+1} falló tras {MAX_RETRIES} intentos. Abortando.")
+                                        all_predictions = []
+                                        break
+
+                                    # Actualizar barra de progreso
+                                    progress.progress(
+                                        (idx + 1) / len(chunks),
+                                        text=f"Chunk {idx+1}/{len(chunks)} procesado ({len(all_predictions)} registros)"
+                                    )
+                                    time.sleep(0.3)  # pausa suave entre chunks
+
+                                progress.empty()
+
+                                if all_predictions and len(all_predictions) == len(records):
+                                    output_path = log_predictions(df_batch, all_predictions)
+
+                                    df_result = df_batch.copy()
+                                    df_result['Pago_atiempo'] = all_predictions
+                                    df_result['Pago_atiempo'] = df_result['Pago_atiempo'].astype(str).map({'0': '❌ No', '1': '✅ Sí'})
+
+                                    st.success(f"✅ {len(all_predictions)} predicciones completadas. Archivo: {output_path}")
+                                    st.dataframe(df_result, width='stretch')
+
+                                    csv_results = df_result.to_csv(index=False)
                                     st.download_button(
                                         label="📥 Descargar resultados",
                                         data=csv_results,
                                         file_name=f"predicciones_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
                                         mime="text/csv"
                                     )
-                                    
-                                    # Estadísticas
+
                                     st.subheader("Resumen de Predicciones")
                                     col1, col2 = st.columns(2)
                                     with col1:
-                                        st.metric("Total procesado", len(df_batch))
+                                        st.metric("Total procesado", len(df_result))
                                     with col2:
-                                        default_count = predictions.count(0)
-                                        st.metric("Predicciones de Riesgo", default_count)
-                                else:
-                                    st.error(f"Error en la API: {response.status_code}")
-                                    st.write(response.text)
+                                        st.metric("Predicciones de Riesgo", all_predictions.count(0))
+
                             except requests.exceptions.ConnectionError:
                                 st.error(f"❌ No se puede conectar con la API en {API_BASE_URL}. Verifica la variable API_BASE_URL y que la API esté activa.")
                             except Exception as e:
@@ -601,4 +642,3 @@ if logged_data is not None and len(logged_data) > 0:
                     st.error(f"Error cargando archivo: {str(e)}")
 else:
     st.info("Los datos mostrados provienen del dataset de validación (20%). Para monitoreo en tiempo real, realiza predicciones usando la pestaña 'Predicciones por Lotes'.")
-
