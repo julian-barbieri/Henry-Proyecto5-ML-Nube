@@ -1,244 +1,274 @@
-# PI_M5_V1 - MLOps Pipeline (Monitoreo y Data Drift)
+# MLOps Pipeline — Predicción de Riesgo Crediticio
 
-Proyecto de MLOps para predicción de riesgo crediticio con:
+Pipeline de MLOps end-to-end para predicción de incumplimiento de pago en préstamos, con API de inferencia, monitoreo de data drift y predicciones por lotes.
 
-- API de inferencia en FastAPI
-- App de monitoreo en Streamlit
-- Detección de data drift con PSI (Population Stability Index)
-- Predicciones batch con exportación de resultados
+**Demo en producción:**
+- 🔗 API REST: [henry-proyecto5-ml-api.onrender.com](https://henry-proyecto5-ml-api.onrender.com/docs)
+- 📊 App Streamlit: [henry-proyecto5-ml-nube-streamlit.onrender.com](https://henry-proyecto5-ml-nube-streamlit.onrender.com)
 
-## Arquitectura actual
+---
 
-```text
-mlops_pipeline/
-├── Dockerfile
-├── requirements.txt
-├── README.md
-└── src/
-    ├── model_deploy.py
-    ├── model_monitoring.py
-    ├── model_training_evaluation.py
-    ├── ft_engineering.py
-    ├── cargar_datos.py
-    ├── models/
-    │   ├── RandomForestClassifier_optuna.pkl
-    │   └── feature_names.pkl
-    └── predicciones/ (generadas al hacer predicciones por lotes en Streamlit)
-        └── predicciones_batch_YYYYMMDD_HHMMSS.csv
+## Arquitectura
+
 ```
+Base_de_datos.xlsx
+       │
+       ▼
+cargar_datos.py          ← Carga y parseo del Excel
+       │
+       ▼
+ft_engineering.py        ← Limpieza, features y preprocesamiento
+       │
+       ▼
+model_training_evaluation.py  ← Entrenamiento, comparación y optimización (Optuna)
+       │
+       ▼
+src/models/
+  ├── RandomForestClassifier_optuna.pkl
+  └── feature_names.pkl
+       │
+       ▼
+model_deploy.py (FastAPI) ← Inferencia individual y por lotes
+       │
+       ▼
+model_monitoring.py (Streamlit) ← Monitoreo, drift y predicciones batch
+```
+
+---
+
+## Estructura del repositorio
+
+```
+Henry-Proyecto5-ML-Nube/
+├── Dockerfile                        # Imagen Docker para la API
+├── requirements.txt                  # Dependencias completas (entrenamiento + Streamlit)
+├── requirements_api.txt              # Dependencias mínimas para la API
+├── Base_de_datos.xlsx                # Dataset fuente
+├── ejemplo_batch_predictions.csv     # CSV de ejemplo para predicciones por lotes
+├── .dockerignore
+└── src/
+    ├── cargar_datos.py               # Carga del Excel
+    ├── ft_engineering.py             # Feature engineering y preprocesamiento
+    ├── model_training_evaluation.py  # Entrenamiento y optimización de modelos
+    ├── model_deploy.py               # API FastAPI
+    ├── model_monitoring.py           # App Streamlit de monitoreo
+    └── models/
+        ├── RandomForestClassifier_optuna.pkl
+        └── feature_names.pkl
+```
+
+---
 
 ## Componentes
 
-### 1) API de inferencia (`src/model_deploy.py`)
+### 1. Carga de datos (`src/cargar_datos.py`)
 
-Endpoints disponibles:
+Lee `Base_de_datos.xlsx` desde la raíz del proyecto y parsea la columna `fecha_prestamo` como datetime. Devuelve un DataFrame listo para el pipeline de features.
 
-- `POST /predict`: predicción individual
-- `POST /predict_batch`: predicción por lote
+---
 
-La API carga:
+### 2. Feature Engineering (`src/ft_engineering.py`)
 
-- `src/models/RandomForestClassifier_optuna.pkl`
-- `src/models/feature_names.pkl`
+Módulo central de preprocesamiento. Recibe los datos crudos y devuelve cuatro objetos listos para modelado: `X_train`, `X_test`, `y_train`, `y_test`.
 
-## 2) Monitoreo (`src/model_monitoring.py`)
+**Limpieza aplicada:**
+- Nulos en `tendencia_ingresos` → `"Sin_informacion"`
+- Nulos en `promedio_ingresos_datacredito` y `puntaje_datacredito` → mediana
+- Nulos en columnas de saldo → `0`
+- Eliminación de fechas futuras (préstamos históricos)
+- Outliers: edad > 90, plazo > 60 meses, salario y otros préstamos > percentil 99
 
-La app Streamlit tiene 4 tabs:
+**Features construidas:**
+- `grupoEdad` — segmentación etaria (Joven / Adulto / Mayor)
+- `es_independiente` — binaria desde `tipo_laboral`
+- `anio_prestamo`, `mes_prestamo`, `dia_semana_prestamo` — descomposición temporal
+- `fin_de_mes` — indicador binario de riesgo temporal
+- `total_creditos` — suma de créditos activos por sector
+- `ratio_mora_saldo` — proporción de mora sobre saldo total (excluida del modelo por leakage)
 
-- **Graficas**: distribución de predicciones y comparación con referencia
-- **Data Drift**: PSI por variable, alertas y evolución temporal
-- **Logs**: vista tabular + descarga CSV desde la UI
-- **Predicciones por Lotes**: carga CSV, consulta API batch y exporta resultados
+**Preprocesamiento con Feature-engine:**
+- Imputación por mediana en numéricas
+- Imputación por moda en categóricas y ordinales
+- Encoding ordinal para `grupoEdad`
+- One-hot encoding para `tipo_credito` y `tendencia_ingresos`
 
-### Comportamiento importante del monitoreo
+**Split temporal:** 80/20 sin shuffle, ordenado por `fecha_prestamo` para respetar la naturaleza secuencial de los datos y evitar leakage.
 
-- El drift se calcula con split base del dataset:
-  - **Referencia:** 80%
-  - **Actual:** 20%
-- Los archivos generados por batch en `src/predicciones/` **no** se usan para cálculo de drift.
-- Cada ejecución batch crea un archivo en:
-  - `src/predicciones/predicciones_batch_YYYYMMDD_HHMMSS.csv`
+**Variables excluidas por leakage:** `saldo_mora`, `saldo_total`, `saldo_principal`, `saldo_mora_codeudor`, `ratio_mora_saldo`, `puntaje`.
 
-## 3) Resumen de archivos clave de modelado
+---
 
-### `src/ft_engineering.py`
+### 3. Entrenamiento y Evaluación (`src/model_training_evaluation.py`)
 
-Este módulo concentra todo el preprocesamiento y devuelve los datasets listos para entrenar/evaluar:
+Compara tres modelos candidatos y optimiza el mejor con Optuna.
 
-- Carga y limpia datos (nulos, outliers y consistencia de tipos).
-- Crea features derivadas de negocio (grupo de edad, variables temporales, total de créditos, etc.).
-- Evita leakage eliminando variables que no deben entrar al modelo.
-- Ordena temporalmente y aplica split 80/20 sin shuffle.
-- Aplica pipeline de Feature-engine (imputación + encoding) y devuelve:
-  - `X_train_processed_fe`, `X_test_processed_fe`, `y_train`, `y_test`.
+**Modelos evaluados:**
+- `RandomForestClassifier`
+- `XGBClassifier`
+- `CatBoostClassifier`
 
-### `src/model_training_evaluation.py`
+**Validación:** `TimeSeriesSplit` con 5 folds para respetar el orden temporal.
 
-Este módulo entrena, compara y optimiza modelos de clasificación:
+**Métrica de selección:** `recall_0` (recall de la clase 0 — préstamos en mora), usando el criterio robusto `mean - std` para penalizar modelos inestables.
 
-- Define tres candidatos: RandomForest, XGBoost y CatBoost.
-- Evalúa con `TimeSeriesSplit` y métricas de clasificación, priorizando clase 0 (`recall_0` y `f1_0`).
-- Selecciona el mejor modelo base con criterio robusto (`mean - std`).
-- Ejecuta optimización de hiperparámetros con Optuna sobre el mejor candidato.
-- Entrena el modelo final, guarda artefactos en `src/models/`:
-  - modelo `*_optuna.pkl`
-  - `feature_names.pkl` (orden de columnas esperado por la API).
+**Optimización:** Optuna con 50 trials sobre el modelo ganador, maximizando `recall_0`.
 
-## 4) Data Drift (PSI)
+**Artefactos generados en `src/models/`:**
+- `{NombreModelo}_optuna.pkl` — modelo entrenado con mejores hiperparámetros
+- `feature_names.pkl` — orden exacto de columnas usado en el entrenamiento
 
-Interpretación usada en la app:
-
-- `PSI < 0.10` → 🟢 Bajo
-- `0.10 <= PSI <= 0.25` → 🟡 Moderado
-- `PSI > 0.25` → 🔴 Alto
-
-Variables temporales excluidas del análisis de drift:
-
-- `mes_prestamo`
-- `anio_prestamo`
-- `dia_semana_prestamo`
-- `fin_de_mes`
-
-## Instalación y ejecución local
-
-### 1) Instalar dependencias
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2) Entrenar (si necesitás regenerar modelos)
-
+**Para reentrenar:**
 ```bash
 cd src
 python model_training_evaluation.py
 ```
 
-### 3) Levantar API
+---
 
+### 4. API de Inferencia (`src/model_deploy.py`)
+
+API REST construida con FastAPI. Carga el modelo y el orden de features al iniciar.
+
+**Endpoints:**
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| `GET` | `/health` | Estado del servicio |
+| `POST` | `/predict` | Predicción individual |
+| `POST` | `/predict_batch` | Predicción por lote (lista de registros) |
+
+**Respuesta de `/predict` y `/predict_batch`:**
+```json
+{"Predicted_default": 0}
+```
+Donde `0` = pagó a tiempo, `1` = incumplimiento.
+
+**Swagger interactivo:** [henry-proyecto5-ml-api.onrender.com/docs](https://henry-proyecto5-ml-api.onrender.com/docs)
+
+---
+
+### 5. App de Monitoreo (`src/model_monitoring.py`)
+
+App Streamlit con 4 pestañas:
+
+**Tab 1 — Gráficas:** distribución de predicciones del conjunto de validación y comparación de medias por variable contra el conjunto de referencia.
+
+**Tab 2 — Data Drift (PSI):** calcula el Population Stability Index para cada feature, genera alertas automáticas y muestra la evolución temporal del drift por ventana configurable.
+
+Interpretación del PSI:
+- `PSI < 0.10` → 🟢 Estable
+- `0.10 ≤ PSI ≤ 0.25` → 🟡 Moderado
+- `PSI > 0.25` → 🔴 Alto — reentrenamiento recomendado
+
+Variables excluidas del análisis de drift: `mes_prestamo`, `anio_prestamo`, `dia_semana_prestamo`, `fin_de_mes` (cambian naturalmente con el tiempo).
+
+**Tab 3 — Logs:** tabla de predicciones del set de validación con descarga en CSV.
+
+**Tab 4 — Predicciones por Lotes:** carga un CSV, lo envía a `/predict_batch` en chunks de 50 registros con reintentos automáticos ante errores 429, y permite descargar los resultados. La columna `Pago_atiempo` aparece primera en el resultado.
+
+---
+
+## Instalación local
+
+### Requisitos
+- Python 3.10+
+- `Base_de_datos.xlsx` en la raíz del proyecto
+
+### 1. Clonar el repositorio
+```bash
+git clone https://github.com/julian-barbieri/Henry-Proyecto5-ML-Nube.git
+cd Henry-Proyecto5-ML-Nube
+```
+
+### 2. Crear entorno virtual e instalar dependencias
+```bash
+python -m venv venv
+# Windows:
+venv\Scripts\activate
+# Linux/Mac:
+source venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+### 3. Reentrenar el modelo (opcional, si no tenés los .pkl)
+```bash
+cd src
+python model_training_evaluation.py
+```
+Esto genera `src/models/RandomForestClassifier_optuna.pkl` y `src/models/feature_names.pkl`.
+
+### 4. Levantar la API
 ```bash
 cd src
 uvicorn model_deploy:app --reload
 ```
+Disponible en `http://localhost:8000/docs`
 
-API docs:
-
-- `http://localhost:8000/docs`
-
-### 4) Levantar Streamlit
-
+### 5. Levantar la app de monitoreo
+En una terminal separada:
 ```bash
 cd src
 streamlit run model_monitoring.py
 ```
+Disponible en `http://localhost:8501`
 
-UI:
-
-- `http://localhost:8501`
+---
 
 ## Ejecución con Docker (solo API)
 
-### Build de imagen
-
+### Build
 ```bash
 docker build -t mlops-api .
 ```
 
-### Run del contenedor
-
+### Run
 ```bash
 docker run -d --name mlops-api-container -p 8000:8000 mlops-api
 ```
 
-### Verificar
+Verificar: `http://localhost:8000/docs`
 
-- API: `http://localhost:8000/docs`
+> El Dockerfile usa `requirements_api.txt` (dependencias mínimas) para mantener la imagen liviana. Streamlit se ejecuta por separado.
 
-> Streamlit sigue ejecutándose localmente (host) en `8501` y consume la API en `localhost:8000`. Solamente consume el endpoint de predicciones por lotes `/predict_batch`
+---
 
-## Deploy en nube (Streamlit público)
+## Deploy en Render
 
-### ¿Se puede en Vercel?
+### API (Docker)
 
-Para este proyecto, **no es la mejor opción** para publicar Streamlit directamente.
+| Campo | Valor |
+|-------|-------|
+| Runtime | Docker |
+| Root Directory | *(vacío)* |
+| Dockerfile Path | `./Dockerfile` |
+| Instance Type | Free |
 
-- Vercel está optimizado para frontends y funciones serverless.
-- Streamlit necesita un proceso Python web vivo (estado de sesión + websocket), no una función efímera.
-- Resultado típico en Vercel: timeouts, reinicios o comportamiento inestable.
+### Streamlit (Python)
 
-### Opción recomendada: Render (API + Streamlit)
+| Campo | Valor |
+|-------|-------|
+| Runtime | Python |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `streamlit run src/model_monitoring.py --server.port $PORT --server.address 0.0.0.0` |
 
-Con Render podés desplegar ambos servicios y dejarlos públicos.
+**Variable de entorno requerida en el servicio Streamlit:**
+```
+API_BASE_URL = https://henry-proyecto5-ml-api.onrender.com
+```
 
-#### 1) Subir repo a GitHub
+---
 
-Asegurate de tener esta estructura en el repo:
+## Predicciones por lotes — Formato del CSV
 
-- `mlops_pipeline/src/model_deploy.py`
-- `mlops_pipeline/src/model_monitoring.py`
-- `mlops_pipeline/requirements.txt`
+El CSV debe contener exactamente estas columnas (ver `ejemplo_batch_predictions.csv`):
 
-#### 2) Crear servicio API (Web Service)
+`capital_prestado`, `plazo_meses`, `edad_cliente`, `salario_cliente`, `total_otros_prestamos`, `cuota_pactada`, `puntaje_datacredito`, `cant_creditosvigentes`, `huella_consulta`, `creditos_sectorFinanciero`, `creditos_sectorCooperativo`, `creditos_sectorReal`, `promedio_ingresos_datacredito`, `grupoEdad`, `es_independiente`, `anio_prestamo`, `mes_prestamo`, `dia_semana_prestamo`, `fin_de_mes`, `total_creditos`, `tipo_credito_4`, `tipo_credito_6`, `tipo_credito_7`, `tipo_credito_9`, `tipo_credito_10`, `tendencia_ingresos_Creciente`, `tendencia_ingresos_Decreciente`, `tendencia_ingresos_Estable`, `tendencia_ingresos_Sin_informacion`
 
-En Render:
-
-- **Runtime:** Python
-- **Root Directory:** `mlops_pipeline`
-- **Build Command:** `pip install -r requirements.txt`
-- **Start Command:** `uvicorn src.model_deploy:app --host 0.0.0.0 --port $PORT`
-
-Al deployar obtendrás una URL tipo:
-
-- `https://tu-api.onrender.com`
-
-Probá:
-
-- `https://tu-api.onrender.com/docs`
-
-#### 3) Crear servicio Streamlit (Web Service)
-
-Nuevo servicio en Render (mismo repo):
-
-- **Runtime:** Python
-- **Root Directory:** `mlops_pipeline`
-- **Build Command:** `pip install -r requirements.txt`
-- **Start Command:** `streamlit run src/model_monitoring.py --server.port $PORT --server.address 0.0.0.0`
-
-Variables de entorno en este servicio:
-
-- `API_BASE_URL=https://tu-api.onrender.com`
-
-Con esto, la pestaña **Predicciones por Lotes** dejará de usar localhost y consumirá tu API pública.
-
-### Opción rápida: Streamlit Community Cloud
-
-Si querés ir más rápido para demo:
-
-1. Crear app en Streamlit Cloud apuntando al repo.
-2. Main file path: `mlops_pipeline/src/model_monitoring.py`.
-3. Agregar `API_BASE_URL` en Secrets/Variables.
-4. Publicar.
-
-### Si querés usar Vercel igual
-
-Patrón recomendado:
-
-- Deploy del frontend en Vercel (Next.js/React).
-- API ML en Render/Railway/Fly.io.
-- No deployar Streamlit en Vercel para producción.
-
-## Flujo recomendado de uso
-
-1. Levantar API (`uvicorn` o Docker)
-2. Levantar Streamlit
-3. Visualizar tabs de **Graficas** y **Data Drift**
-4. Ir a **Predicciones por Lotes**
-5. Cargar un CSV con columnas esperadas por el modelo
-6. Ejecutar predicciones
-7. Descargar resultados desde la UI
+---
 
 ## Notas de mantenimiento
 
-- Si cambiás features del modelo, regenerá `feature_names.pkl` y el `.pkl` del modelo.
-- Si cambian puertos/host de API, actualizá las URLs de consumo en `model_monitoring.py`.
-- La carpeta `src/predicciones/` actúa como salida de corridas batch.
+- Si se reentrenan los modelos, los nuevos `.pkl` deben commitearse al repo para que el deploy en Render los incluya en la imagen Docker.
+- Si se agregan o eliminan features, regenerar `feature_names.pkl` y actualizar el schema `InsuranceData` en `model_deploy.py`.
+- Render free tier duerme los servicios tras 15 minutos de inactividad. Se recomienda configurar un ping periódico a `/health` con [UptimeRobot](https://uptimerobot.com) para mantener la API activa durante demos.
