@@ -615,6 +615,7 @@ if logged_data is not None and len(logged_data) > 0:
                                     df_result = df_batch.copy()
                                     df_result['Pago_atiempo'] = all_predictions
                                     df_result['Pago_atiempo'] = df_result['Pago_atiempo'].astype(str).map({'0': '❌ No', '1': '✅ Sí'})
+                                    df_result = df_result[['Pago_atiempo'] + [c for c in df_result.columns if c != 'Pago_atiempo']]
 
                                     st.success(f"✅ {len(all_predictions)} predicciones completadas. Archivo: {output_path}")
                                     st.dataframe(df_result, width='stretch')
