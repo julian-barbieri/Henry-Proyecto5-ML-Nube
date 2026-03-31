@@ -156,6 +156,77 @@ docker run -d --name mlops-api-container -p 8000:8000 mlops-api
 
 > Streamlit sigue ejecutándose localmente (host) en `8501` y consume la API en `localhost:8000`. Solamente consume el endpoint de predicciones por lotes `/predict_batch`
 
+## Deploy en nube (Streamlit público)
+
+### ¿Se puede en Vercel?
+
+Para este proyecto, **no es la mejor opción** para publicar Streamlit directamente.
+
+- Vercel está optimizado para frontends y funciones serverless.
+- Streamlit necesita un proceso Python web vivo (estado de sesión + websocket), no una función efímera.
+- Resultado típico en Vercel: timeouts, reinicios o comportamiento inestable.
+
+### Opción recomendada: Render (API + Streamlit)
+
+Con Render podés desplegar ambos servicios y dejarlos públicos.
+
+#### 1) Subir repo a GitHub
+
+Asegurate de tener esta estructura en el repo:
+
+- `mlops_pipeline/src/model_deploy.py`
+- `mlops_pipeline/src/model_monitoring.py`
+- `mlops_pipeline/requirements.txt`
+
+#### 2) Crear servicio API (Web Service)
+
+En Render:
+
+- **Runtime:** Python
+- **Root Directory:** `mlops_pipeline`
+- **Build Command:** `pip install -r requirements.txt`
+- **Start Command:** `uvicorn src.model_deploy:app --host 0.0.0.0 --port $PORT`
+
+Al deployar obtendrás una URL tipo:
+
+- `https://tu-api.onrender.com`
+
+Probá:
+
+- `https://tu-api.onrender.com/docs`
+
+#### 3) Crear servicio Streamlit (Web Service)
+
+Nuevo servicio en Render (mismo repo):
+
+- **Runtime:** Python
+- **Root Directory:** `mlops_pipeline`
+- **Build Command:** `pip install -r requirements.txt`
+- **Start Command:** `streamlit run src/model_monitoring.py --server.port $PORT --server.address 0.0.0.0`
+
+Variables de entorno en este servicio:
+
+- `API_BASE_URL=https://tu-api.onrender.com`
+
+Con esto, la pestaña **Predicciones por Lotes** dejará de usar localhost y consumirá tu API pública.
+
+### Opción rápida: Streamlit Community Cloud
+
+Si querés ir más rápido para demo:
+
+1. Crear app en Streamlit Cloud apuntando al repo.
+2. Main file path: `mlops_pipeline/src/model_monitoring.py`.
+3. Agregar `API_BASE_URL` en Secrets/Variables.
+4. Publicar.
+
+### Si querés usar Vercel igual
+
+Patrón recomendado:
+
+- Deploy del frontend en Vercel (Next.js/React).
+- API ML en Render/Railway/Fly.io.
+- No deployar Streamlit en Vercel para producción.
+
 ## Flujo recomendado de uso
 
 1. Levantar API (`uvicorn` o Docker)
